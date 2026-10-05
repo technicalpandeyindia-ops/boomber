@@ -1,6 +1,8 @@
 import asyncio
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -19,6 +21,20 @@ WAIT_MODE   = 2
 WAIT_ROUNDS = 3
 
 active_jobs: dict[int, bool] = {}
+
+
+# ── health server (keeps render happy) ──
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args):
+        pass
+
+def _keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    HTTPServer(("0.0.0.0", port), _Health).serve_forever()
 
 
 def is_authorized(user_id: int) -> bool:
@@ -189,6 +205,10 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    # health server — render ko khush rakhta hai
+    threading.Thread(target=_keep_alive, daemon=True).start()
+    logger.info(f"Health server started on port {os.environ.get('PORT', 8080)}")
+
     app = Application.builder().token(TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CommandHandler("bomb", bomb_start)],
@@ -204,7 +224,7 @@ def main():
     app.add_handler(CommandHandler("stop",   stop_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(conv)
-    logger.info("Bot running...")
+    logger.info("Bot polling...")
     app.run_polling(drop_pending_updates=True)
 
 
