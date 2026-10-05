@@ -7,7 +7,8 @@ try:
     uvloop.install()
 except ImportError:
     pass
-    async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
+
+async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
     """Fire one API — returns (name, type, status_code, fired:bool)"""
     try:
         url  = cfg["url"](phone) if callable(cfg["url"]) else cfg["url"]
