@@ -7,6 +7,29 @@ try:
     uvloop.install()
 except ImportError:
     pass
+    async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
+    """Fire one API — returns (name, type, status_code, fired:bool)"""
+    try:
+        url  = cfg["url"](phone) if callable(cfg["url"]) else cfg["url"]
+        data = cfg["data"](phone) if cfg["data"] else None
+        h    = {k: (v(data) if callable(v) else v) for k, v in cfg["headers"].items()}
+        to   = aiohttp.ClientTimeout(total=5.0, connect=2.0, sock_read=3.0)
+
+        if cfg["method"] == "GET":
+            async with session.get(url, headers=h, timeout=to) as r:
+                body = (await r.text())[:300]
+                fired = r.status < 400
+                print(f"[{cfg['name']}] {r.status} | fired={fired} | {body[:80]}")
+                return cfg["name"], cfg["type"], fired
+        else:
+            async with session.post(url, headers=h, data=data, timeout=to) as r:
+                body = (await r.text())[:300]
+                fired = r.status < 400
+                print(f"[{cfg['name']}] {r.status} | fired={fired} | {body[:80]}")
+                return cfg["name"], cfg["type"], fired
+    except Exception as e:
+        print(f"[{cfg['name']}] ERROR | {str(e)[:80]}")
+        return cfg["name"], cfg["type"], False
 
 API_CONFIGS = [
     # ── CONFIRMED WORKING ──────────────────
