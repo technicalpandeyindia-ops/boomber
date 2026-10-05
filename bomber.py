@@ -416,3 +416,17 @@ async def run_bomber(phone: str, mode: str = "ALL", rounds: int = 1) -> dict:
             if fired:
                 total_fired += 1
                 if typ == "SMS":    sms_fired += 1
+                elif typ == "WA":   wa_fired  += 1
+                elif typ == "CALL": call_fired += 1
+
+    elapsed = time.time() - start
+    total   = len(pool) * rounds
+
+    return {
+        "sms":   sms_fired,
+        "wa":    wa_fired,
+        "call":  call_fired,
+        "fired": total_fired,
+        "total": total,
+        "rps":   round(total / elapsed, 2) if elapsed else 0,
+    }
